@@ -37,19 +37,47 @@ import java.util.List;
 
 public class MainActivity extends Activity {
     private static final int PERMISSION_REQUEST = 41;
+    private static final long MAX_CALL_MS = 10 * 60 * 1000L;
     private EditText number, batchNumbers;
     private TextView queueStatus;
     private final List<String> queue = new ArrayList<>();
     private int queueIndex = 0;
     private boolean queueActive = false, callObserved = false, receiverRegistered = false;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private Runnable maxCallTask;
+    private void cancelMaxCallTask() {
+        if (maxCallTask != null) handler.removeCallbacks(maxCallTask);
+        maxCallTask = null;
+    }
+    private void scheduleMaxCall() {
+        cancelMaxCallTask();
+        final int currentIndex = queueIndex;
+        maxCallTask = () -> {
+            if (!queueActive || queueIndex != currentIndex || !callObserved) return;
+            if (!granted(Manifest.permission.ANSWER_PHONE_CALLS)) {
+                stopQueue("Phone call control permission missing. List stopped."); return;
+            }
+            try {
+                if (telecom.isInCall() && telecom.endCall())
+                    queueStatus.setText("10-minute limit reached. Ending call...");
+                else stopQueue("Could not end the call. List stopped for safety.");
+            } catch (SecurityException e) {
+                stopQueue("Could not end the call. List stopped for safety.");
+            }
+        };
+        handler.postDelayed(maxCallTask, MAX_CALL_MS);
+    }
     private final BroadcastReceiver callStateReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             if (!queueActive || !TelephonyManager.ACTION_PHONE_STATE_CHANGED.equals(intent.getAction())) return;
             String state = intent.getStringExtra(TelephonyManager.EXTRA_STATE);
-            if (TelephonyManager.EXTRA_STATE_OFFHOOK.equals(state)) callObserved = true;
+            if (TelephonyManager.EXTRA_STATE_OFFHOOK.equals(state) && !callObserved) {
+                callObserved = true;
+                scheduleMaxCall();
+            }
             if (TelephonyManager.EXTRA_STATE_IDLE.equals(state) && callObserved) {
                 callObserved = false;
+                cancelMaxCallTask();
                 queueIndex++;
                 queueStatus.setText("Call ended. Next call in 5 seconds...");
                 handler.postDelayed(thisActivityNextCall(), 5000);
@@ -152,7 +180,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(-1, -2);
         statusLp.setMargins(0, dp(12), 0, 0);
         listCard.addView(queueStatus, statusLp);
-        listCard.addView(text("Next number starts 5 seconds after the current call ends. Keep the app open.", 12, 0xff60758d, false));
+        listCard.addView(text("Each call is limited to 10 minutes from the phone OFFHOOK state. Next number starts 5 seconds after the call ends. Keep the app open.", 12, 0xff60758d, false));
 
         LinearLayout reportCard = card(root);
         sectionTitle(reportCard, "3. Call report", "Saved in this phone's call history");
@@ -169,7 +197,7 @@ public class MainActivity extends Activity {
     private boolean granted(String p) { return checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED; }
     private void askPermissions() {
         List<String> missing = new ArrayList<>();
-        for (String p : new String[]{Manifest.permission.READ_PHONE_STATE, Manifest.permission.CALL_PHONE, Manifest.permission.READ_CALL_LOG})
+        for (String p : new String[]{Manifest.permission.READ_PHONE_STATE, Manifest.permission.CALL_PHONE, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.READ_CALL_LOG})
             if (!granted(p)) missing.add(p);
         if (!missing.isEmpty()) requestPermissions(missing.toArray(new String[0]), PERMISSION_REQUEST);
         else refresh();
@@ -231,7 +259,7 @@ public class MainActivity extends Activity {
         if (selected == null || !handles.contains(selected)) {
             Toast.makeText(this, "Select a SIM first", Toast.LENGTH_SHORT).show(); return;
         }
-        if (!granted(Manifest.permission.CALL_PHONE) || !granted(Manifest.permission.READ_PHONE_STATE)) {
+        if (!granted(Manifest.permission.CALL_PHONE) || !granted(Manifest.permission.READ_PHONE_STATE) || !granted(Manifest.permission.ANSWER_PHONE_CALLS)) {
             askPermissions(); return;
         }
         if (telecom.isInCall()) { Toast.makeText(this, "Finish current call first", Toast.LENGTH_SHORT).show(); return; }
@@ -267,6 +295,7 @@ public class MainActivity extends Activity {
     }
     private void stopQueue(String message) {
         queueActive = false; callObserved = false;
+        cancelMaxCallTask();
         handler.removeCallbacksAndMessages(null);
         if (receiverRegistered) { unregisterReceiver(callStateReceiver); receiverRegistered = false; }
         if (queueStatus != null) queueStatus.setText(message);
